@@ -1,207 +1,102 @@
 #!/usr/bin/env python3
 """
-Script de análise dos resultados do planejamento fatorial 2^2.
+Script responsável por analisar os resultados gerados no CSV.
 
-Entrada:
-    resultados_imunes/resultados.csv
+Ele realiza:
 
-Saídas:
-    sumários estatísticos
-    gráficos com IC95
+1) Leitura dos resultados
+2) Cálculo da média
+3) Desvio padrão
+4) Intervalo de confiança (95%)
+5) Geração de gráficos
 """
 
-from pathlib import Path
-import numpy as np
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import t
+from scipy import stats
 
+CSV_PATH = "resultados_imunes/resultados.csv"
 
-CSV_PATH = Path("resultados_imunes/resultados.csv")
 
-OUT_DIR = Path("resultados_imunes")
+# ===============================
+# INTERVALO DE CONFIANÇA
+# ===============================
 
-FIG_DIR = OUT_DIR / "figuras"
+def ic95(data):
+    """
+    Calcula intervalo de confiança de 95%.
+    """
 
-FIG_DIR.mkdir(parents=True, exist_ok=True)
+    n = len(data)
+    mean = np.mean(data)
+    sd = np.std(data, ddof=1)
 
+    t = stats.t.ppf(0.975, n - 1)
 
-# =========================================================
-# SUMÁRIO DE UMA VARIÁVEL
-# =========================================================
+    ic = t * sd / np.sqrt(n)
 
-def summarize_response(df, y):
+    return mean, ic
 
-    g = df.groupby(["alg", "bg_mbps"])[y]
 
-    n = g.count()
-    mean = g.mean()
-    sd = g.std(ddof=1)
-
-    se = sd / np.sqrt(n)
-
-    tcrit = t.ppf(0.975, n - 1)
-
-    ci = tcrit * se
-
-    out = pd.DataFrame({
-
-        "alg": mean.index.get_level_values(0),
-
-        "bg_mbps": mean.index.get_level_values(1),
-
-        "n": n.values,
-
-        "mean": mean.values,
-
-        "sd": sd.values,
-
-        "ci95_half": ci.values,
-
-        "ci95_low": (mean - ci).values,
-
-        "ci95_high": (mean + ci).values,
-
-    })
-
-    return out
-
-
-# =========================================================
-# EFEITOS DO PLANEJAMENTO
-# =========================================================
-
-def factorial_effects(df, y):
-
-    cell = df.groupby(["alg", "bg_mbps"])[y].mean().reset_index()
-
-    cell["xA"] = cell["alg"].map({"reno": -1, "cubic": 1})
-
-    cell["xB"] = cell["bg_mbps"].map({800: -1, 900: 1})
-
-    cell["xAB"] = cell["xA"] * cell["xB"]
-
-    b0 = cell[y].mean()
-
-    bA = (cell["xA"] * cell[y]).sum() / 4
-
-    bB = (cell["xB"] * cell[y]).sum() / 4
-
-    bAB = (cell["xAB"] * cell[y]).sum() / 4
-
-    return {
-
-        "effect_A": 2 * bA,
-
-        "effect_B": 2 * bB,
-
-        "effect_AB": 2 * bAB
-
-    }
-
-
-# =========================================================
-# GRÁFICOS
-# =========================================================
-
-def plot_means(summary, y_label, title, file):
-
-    algs = sorted(summary.alg.unique())
-
-    loads = sorted(summary.bg_mbps.unique())
-
-    x = np.arange(len(loads))
-
-    fig, ax = plt.subplots()
-
-    for alg in algs:
-
-        sub = summary[summary.alg == alg].sort_values("bg_mbps")
-
-        ax.errorbar(
-
-            x,
-
-            sub.mean,
-
-            yerr=sub.ci95_half,
-
-            marker="o",
-
-            label=alg
-
-        )
-
-    ax.set_xticks(x)
-
-    ax.set_xticklabels([f"{l} Mbps" for l in loads])
-
-    ax.set_xlabel("Carga UDP de fundo")
-
-    ax.set_ylabel(y_label)
-
-    ax.set_title(title)
-
-    ax.legend()
-
-    fig.savefig(file, dpi=200)
-
-    plt.close()
-
-
-# =========================================================
-# MAIN
-# =========================================================
+# ===============================
+# ANÁLISE PRINCIPAL
+# ===============================
 
 def main():
 
     df = pd.read_csv(CSV_PATH)
 
-    sum_thr = summarize_response(df, "iperf_avg_mbps")
+    resultados = []
 
-    sum_ret = summarize_response(df, "retrans_rate")
+    for alg in df.alg.unique():
+        for bg in df.bg_mbps.unique():
 
-    plot_means(
+            subset = df[(df.alg == alg) & (df.bg_mbps == bg)]
 
-        sum_thr,
+            mean, ic = ic95(subset.iperf_avg_mbps)
 
-        "Vazão média (Mbps)",
+            resultados.append({
+                "alg": alg,
+                "bg": bg,
+                "mean": mean,
+                "ic": ic
+            })
 
-        "Throughput TCP",
+    res = pd.DataFrame(resultados)
 
-        FIG_DIR / "throughput.png"
+    print("\nResultados:")
+    print(res)
 
-    )
+    # ============================
+    # GRÁFICO
+    # ============================
 
-    plot_means(
+    plt.figure()
 
-        sum_ret,
+    for alg in res.alg.unique():
 
-        "Taxa de retransmissão",
+        sub = res[res.alg == alg]
 
-        "Retransmissões TCP",
+        plt.errorbar(
+            sub.bg,
+            sub.mean,
+            yerr=sub.ic,
+            marker='o',
+            label=alg
+        )
 
-        FIG_DIR / "retrans.png"
+    plt.xlabel("Tráfego UDP de fundo (Mbps)")
+    plt.ylabel("Throughput TCP (Mbps)")
+    plt.title("Impacto do congestionamento no TCP")
 
-    )
+    plt.legend()
 
-    sum_thr.to_csv(OUT_DIR / "sumario_throughput.csv", index=False)
+    plt.grid(True)
 
-    sum_ret.to_csv(OUT_DIR / "sumario_retrans.csv", index=False)
+    plt.savefig("grafico_throughput.png")
 
-    eff_thr = factorial_effects(df, "iperf_avg_mbps")
-
-    eff_ret = factorial_effects(df, "retrans_rate")
-
-    pd.DataFrame([
-
-        {"y": "throughput", **eff_thr},
-
-        {"y": "retrans", **eff_ret}
-
-    ]).to_csv(OUT_DIR / "efeitos.csv", index=False)
-
-    print("Análise concluída.")
+    plt.show()
 
 
 if __name__ == "__main__":

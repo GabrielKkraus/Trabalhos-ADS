@@ -1,246 +1,232 @@
 #!/usr/bin/env python3
 """
-Automação do experimento no IMUNES.
+Script responsável por executar automaticamente o experimento no IMUNES.
 
-Planejamento fatorial 2^2:
+O objetivo é medir o comportamento do TCP sob diferentes condições
+de congestionamento utilizando planejamento fatorial 2².
 
-Fator A: algoritmo TCP
+Fatores do experimento:
+
+A → Algoritmo TCP
     - reno
     - cubic
 
-Fator B: carga UDP de fundo
+B → Tráfego UDP de fundo
     - 800 Mbps
     - 900 Mbps
 
-Cada tratamento é repetido várias vezes.
+Número de repetições:
+    8
 
-Medições coletadas:
-    - vazão média TCP (iperf)
-    - número de retransmissões TCP (tcpdump + tshark)
+Fluxos utilizados no experimento:
 
-Saída:
-    resultados_imunes/resultados.csv
+Fluxo principal (medição):
+    pc1 → pc2  (TCP)
+
+Tráfego de fundo:
+    pc3 → pc4  (UDP)
+
+Ambos compartilham o link entre os roteadores,
+gerando competição por largura de banda.
 """
 
-import csv
 import subprocess
-import re
-from pathlib import Path
+import time
+import csv
+import os
 from datetime import datetime
 
-
-# =========================================================
+# ===============================
 # CONFIGURAÇÕES DO EXPERIMENTO
-# =========================================================
+# ===============================
 
+REPETICOES = 8
+DURACAO_IPERF = 20
+
+TCP_ALGS = ["reno", "cubic"]
+BG_TRAFFIC = [800, 900]
+
+# Nós da topologia IMUNES
 PC1 = "pc1"
 PC2 = "pc2"
+PC3 = "pc3"
+PC4 = "pc4"
 
-PC1_IP = "10.0.0.20"
-PC2_IP = "10.0.2.20"
+# IPs usados
+PC2_IP = "10.0.2.10"
+PC4_IP = "10.0.2.30"
 
-TCP_PORT = 5001
+RESULT_DIR = "resultados_imunes"
+CSV_FILE = os.path.join(RESULT_DIR, "resultados.csv")
 
-DURACAO_IPERF = 30
-
-ALGS = ["reno", "cubic"]
-
-UDP_BG = [800, 900]
-
-REPS = 8
-
-OUTDIR = Path("resultados_imunes")
-OUTDIR.mkdir(exist_ok=True)
-
-CSV_PATH = OUTDIR / "resultados.csv"
+os.makedirs(RESULT_DIR, exist_ok=True)
 
 
-# =========================================================
-# EXECUÇÃO DE COMANDOS
-# =========================================================
+# ===============================
+# EXECUTAR COMANDO
+# ===============================
 
-def sh(cmd: str) -> str:
-    """Executa comando no host."""
-    print("$", cmd)
-
-    p = subprocess.run(
-        cmd,
-        shell=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT
-    )
-
-    if p.returncode != 0:
-        raise RuntimeError(p.stdout)
-
-    return p.stdout
+def run(cmd):
+    """Executa um comando no shell e retorna a saída."""
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
 
 
-def himage(node: str, cmd: str) -> str:
-    """Executa comando dentro de um nó IMUNES."""
-    return sh(f"sudo himage {node} {cmd}")
+# ===============================
+# EXECUTAR COMANDO NO NÓ DO IMUNES
+# ===============================
+
+def himage(node, command):
+    """
+    Executa um comando dentro de um nó da topologia IMUNES.
+
+    Exemplo:
+        himage("pc1", "iperf ...")
+    """
+    return run(f"sudo himage {node} {command}")
 
 
-# =========================================================
-# CONFIGURAÇÃO TCP
-# =========================================================
+# ===============================
+# CONFIGURAR ALGORITMO TCP
+# ===============================
 
 def set_tcp_alg(alg):
-    """Define algoritmo TCP no pc1."""
-    himage(PC1, f"sysctl -w net.ipv4.tcp_congestion_control={alg}")
+    """
+    Configura o algoritmo TCP usado no pc1.
+
+    Isso altera como o TCP reage a congestionamento.
+    """
+    print(f"\nConfigurando algoritmo TCP: {alg}")
+
+    run(f"sudo sysctl -w net.ipv4.tcp_congestion_control={alg}")
 
 
-# =========================================================
-# SERVIDOR IPERF
-# =========================================================
+# ===============================
+# INICIAR SERVIDOR TCP
+# ===============================
 
-def start_iperf_server():
-
+def start_tcp_server():
+    """
+    Inicia o servidor iperf TCP no pc2.
+    """
     himage(PC2, "pkill iperf || true")
+    himage(PC2, "nohup iperf -s -p 5001 >/tmp/iperf_tcp.log 2>&1 &")
 
-    himage(PC2, "nohup iperf -s >/tmp/iperf.log 2>&1 &")
 
-
-# =========================================================
-# GERADOR DE TRÁFEGO UDP
-# =========================================================
+# ===============================
+# TRÁFEGO UDP DE FUNDO
+# ===============================
 
 def start_udp_background(rate):
+    """
+    Gera tráfego UDP de fundo entre pc3 e pc4.
 
-    himage(PC2, "pkill iperf || true")
+    Isso cria congestionamento no link entre os roteadores.
+    """
 
+    print(f"Gerando tráfego UDP de fundo: {rate} Mbps")
+
+    # servidor UDP
+    himage(PC4, "pkill iperf || true")
+    himage(PC4, "nohup iperf -u -s -p 6001 >/tmp/iperf_udp.log 2>&1 &")
+
+    # cliente UDP
     himage(
-        PC2,
-        f"nohup iperf -u -s -p 6001 >/tmp/iperf_udp.log 2>&1 &"
+        PC3,
+        f"nohup iperf -u -c {PC4_IP} -p 6001 -b {rate}M -t {DURACAO_IPERF} >/dev/null 2>&1 &"
     )
 
-    himage(
+
+# ===============================
+# EXECUTAR TESTE TCP
+# ===============================
+
+def run_tcp_test():
+    """
+    Executa o iperf TCP entre pc1 e pc2.
+
+    Retorna a vazão média medida.
+    """
+
+    output = himage(
         PC1,
-        f"nohup iperf -u -c {PC2_IP} -p 6001 -b {rate}M -t {DURACAO_IPERF} >/dev/null 2>&1 &"
+        f"iperf -c {PC2_IP} -p 5001 -t {DURACAO_IPERF}"
     )
 
+    for line in output.splitlines():
+        if "Mbits/sec" in line and "sec" in line:
+            try:
+                return float(line.split()[-2])
+            except:
+                pass
 
-# =========================================================
-# PARSE DA SAÍDA DO IPERF
-# =========================================================
-
-def parse_iperf(out):
-
-    lines = [l for l in out.splitlines() if "Mbits/sec" in l]
-
-    last = lines[-1]
-
-    parts = last.split()
-
-    for i, p in enumerate(parts):
-        if p == "Mbits/sec":
-            return float(parts[i - 1])
-
-    raise RuntimeError("não achei taxa")
+    return 0
 
 
-# =========================================================
-# EXECUTA UMA REPETIÇÃO
-# =========================================================
+# ===============================
+# SALVAR RESULTADOS
+# ===============================
 
-def run_one(alg, bg, rep):
+def salvar_csv(linha):
+    """
+    Salva uma linha de resultado no arquivo CSV.
+    """
 
-    ts = datetime.now().isoformat()
+    header = [
+        "timestamp",
+        "rep",
+        "alg",
+        "bg_mbps",
+        "iperf_avg_mbps"
+    ]
 
-    set_tcp_alg(alg)
+    file_exists = os.path.isfile(CSV_FILE)
 
-    start_udp_background(bg)
+    with open(CSV_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
 
-    pcap = f"/tmp/cap_{alg}_{bg}_{rep}.pcap"
+        if not file_exists:
+            writer.writerow(header)
 
-    himage(
-        PC1,
-        f"tcpdump -i any tcp and host {PC2_IP} -w {pcap} & echo $! >/tmp/tcpdump.pid"
-    )
-
-    out = himage(
-        PC1,
-        f"iperf -c {PC2_IP} -t {DURACAO_IPERF}"
-    )
-
-    vazao = parse_iperf(out)
-
-    himage(
-        PC1,
-        "kill -INT $(cat /tmp/tcpdump.pid)"
-    )
-
-    local_pcap = OUTDIR / f"{alg}_{bg}_{rep}.pcap"
-
-    sh(f"sudo hcp {PC1}:{pcap} {local_pcap}")
-
-    total = int(sh(
-        f'tshark -r "{local_pcap}" -Y "tcp.len>0" | wc -l'
-    ))
-
-    retrans = int(sh(
-        f'tshark -r "{local_pcap}" -Y "tcp.analysis.retransmission" | wc -l'
-    ))
-
-    retrans_rate = retrans / total if total else 0
-
-    local_pcap.unlink()
-
-    return {
-        "timestamp": ts,
-        "rep": rep,
-        "alg": alg,
-        "bg_mbps": bg,
-        "iperf_avg_mbps": vazao,
-        "n_dados": total,
-        "n_retrans": retrans,
-        "retrans_rate": retrans_rate
-    }
+        writer.writerow(linha)
 
 
-# =========================================================
-# LOOP PRINCIPAL
-# =========================================================
+# ===============================
+# LOOP PRINCIPAL DO EXPERIMENTO
+# ===============================
 
 def main():
 
-    start_iperf_server()
+    print("\n===== INICIANDO EXPERIMENTO =====")
 
-    write_header = not CSV_PATH.exists()
+    for alg in TCP_ALGS:
 
-    with open(CSV_PATH, "a", newline="") as f:
+        set_tcp_alg(alg)
 
-        w = csv.DictWriter(
-            f,
-            fieldnames=[
-                "timestamp",
-                "rep",
-                "alg",
-                "bg_mbps",
-                "iperf_avg_mbps",
-                "n_dados",
-                "n_retrans",
-                "retrans_rate"
-            ]
-        )
+        for bg in BG_TRAFFIC:
 
-        if write_header:
-            w.writeheader()
+            for rep in range(1, REPETICOES + 1):
 
-        for alg in ALGS:
-            for bg in UDP_BG:
-                for rep in range(1, REPS + 1):
+                print(f"\nRUN alg={alg} bg_udp={bg} Mbps rep={rep}")
 
-                    print(f"\nRUN {alg} bg={bg} rep={rep}")
+                start_tcp_server()
 
-                    row = run_one(alg, bg, rep)
+                start_udp_background(bg)
 
-                    w.writerow(row)
+                time.sleep(2)
 
-                    f.flush()
+                throughput = run_tcp_test()
 
-    print("CSV salvo em", CSV_PATH)
+                salvar_csv([
+                    datetime.now().isoformat(),
+                    rep,
+                    alg,
+                    bg,
+                    throughput
+                ])
+
+                time.sleep(2)
+
+    print("\nExperimento finalizado.")
 
 
 if __name__ == "__main__":
