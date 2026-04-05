@@ -1,0 +1,8 @@
+# 1. Criar ambiente virtual
+python3 -m venv venv
+
+# 2. Ativar
+source venv/bin/activate
+
+# 3. Instalar numpy
+pip install numpy
