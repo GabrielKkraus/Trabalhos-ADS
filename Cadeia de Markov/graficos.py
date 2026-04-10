@@ -22,7 +22,6 @@
 
 import argparse
 from pathlib import Path
-
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
@@ -79,7 +78,7 @@ def vetor_estacionario(P: np.ndarray) -> np.ndarray:
     Usa resolução de sistema linear para estabilidade numérica.
     """
     n = P.shape[0]
-    A = (P.T - np.eye(n)).T
+    A = P.T - np.eye(n)    # (Pᵀ - I) · π = 0
     A[-1] = 1.0
     b = np.zeros(n)
     b[-1] = 1.0

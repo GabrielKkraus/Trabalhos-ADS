@@ -6,3 +6,6 @@ source venv/bin/activate
 
 # 3. Instalar numpy
 pip install numpy
+
+#para gráficos
+pip install matplotlib pandas

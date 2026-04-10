@@ -328,11 +328,10 @@ def vetor_estacionario() -> np.ndarray:
 
     MÉTODO NUMÉRICO
     ---------------
-    Em vez de buscar o autovetor do autovalor 1 (instável numericamente),
-    reformulamos como sistema linear substituindo a última equação pelo
-    vínculo sum(π) = 1, formando Ax = b com solução única:
+    Reformula como sistema linear (Pᵀ - I) · π = 0, substituindo a última
+    linha pelo vínculo sum(π) = 1, formando Ax = b com solução única:
 
-      A = (Pᵀ - I)ᵀ  com a última linha substituída por [1, 1, 1]
+      A = Pᵀ - I  com a última linha substituída por [1, 1, 1]
       b = [0, 0, 1]
 
     np.linalg.solve(A, b) resolve de forma numericamente estável.
@@ -340,15 +339,15 @@ def vetor_estacionario() -> np.ndarray:
     Retorno : array numpy [π0, π1, π2]
     """
     P_np = np.array(P, dtype=float)
-    n = P_np.shape[0]  # Número de estados (3)
+    n = P_np.shape[0]
 
-    # Sistema (Pᵀ - I) · π = 0 (equações de balanço)
-    A = (P_np.T - np.eye(n)).T
+    # Sistema (Pᵀ - I) · π = 0 (equações de balanço na forma coluna)
+    A = P_np.T - np.eye(n)
 
     # Substitui última linha por sum(π) = 1 para garantir solução única
     A[-1] = 1.0
     b = np.zeros(n)
-    b[-1] = 1.0  # Restrição de normalização
+    b[-1] = 1.0
 
     return np.linalg.solve(A, b)
 
